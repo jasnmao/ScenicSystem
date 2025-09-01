@@ -23,25 +23,28 @@ BOAT_WAIT_TIME = 600     # 游船等待时间，单位：秒 (10分钟)
 BOAT_INTERVAL = 3600     # 游船发车间隔，单位：秒 (1小时)
 
 # 观光车相关参数
-TOUR_BUS_SPEED = 10.0  # 观光车速度，单位：米/秒 (约36公里/小时)
-TOUR_BUS_COUNT = 10    # 观光车数量
-TOUR_BUS_START_HOUR = 8  # 观光车开始时间（小时）
-TOUR_BUS_END_HOUR = 16   # 观光车结束时间（小时）
-TOUR_BUS_STOP_TIME = 180  # 观光车停靠时间，单位：秒 (3分钟)
-TOUR_BUS_BASE_FARE = 5    # 观光车基础票价
-TOUR_BUS_PER_STOP_FARE = 3  # 观光车每站附加票价
+TOUR_BUS_SPEED = 8.0  # 观光车速度，单位：米/秒 (约28.8公里/小时)
+TOUR_BUS_SCHEDULE_START = 8  # 观光车开始时间（小时）
+TOUR_BUS_SCHEDULE_END = 16   # 观光车结束时间（小时）
+TOUR_BUS_DEPARTURE_INTERVAL = 600  # 观光车发车间隔，单位：秒 (10分钟)
+TOUR_BUS_STOP_TIME = 180  # 观光车每站停靠时间，单位：秒 (3分钟)
+TOUR_BUS_BASE_FARE = 5  # 观光车基础票价
+TOUR_BUS_PER_STOP_FARE = 0  # 观光车每站加价
+TOUR_BUS_COUNT = 10  # 观光车数量
 
-# 观光车路线定义
-TOUR_BUS_ROUTES = [
-    # 路线1: 入口 -> 花园 -> 湖泊 -> 观景台 -> 餐厅 -> 博物馆 -> 出口 -> 返回
-    ["入口", "花园", "湖泊", "观景台", "餐厅", "博物馆", "出口"],
-    # 路线2: 入口 -> 花园 -> 观景台 -> 博物馆 -> 出口 -> 返回
-    ["入口", "花园", "观景台", "博物馆", "出口"]
-]
+# 定义观光车路线 - 使用字典存储多条路线
+TOUR_BUS_ROUTES = {
+    1: ["入口", "花园", "湖泊", "观景台", "餐厅", "博物馆", "出口"],
+    2: ["入口", "花园", "观景台", "博物馆", "出口"],
+    # 可以添加更多路线
+}
 
-# 全局变量，存储观光车当前位置
-tour_bus_positions = []
-tour_bus_lock = threading.Lock()
+# 全局变量存储观光车时间表
+tour_bus_schedule = {}
+
+# 添加全局变量缓存景点间距离
+attraction_distances_cache = None
+
 
 class Node:
     """节点类，表示景点或道路转弯点"""
@@ -103,215 +106,306 @@ class ScenicAreaGraph:
     def get_node(self, node_id: str) -> Optional[Node]:
         """根据节点ID获取节点"""
         return self.nodes.get(node_id)
-    
-class TourBus:
-    """观光车类"""
-    def __init__(self, bus_id: int, route_index: int):
-        self.id = bus_id
-        self.route_index = route_index
-        self.route = TOUR_BUS_ROUTES[route_index]
-        self.current_stop_index = 0
-        self.current_position = self.route[0]  # 初始位置为路线起点
-        self.next_departure_time = None
-        self.is_waiting = True
-        self.passengers = []  # 车上乘客
-    
-    def update_position(self, current_time: datetime.datetime):
-        """更新观光车位置"""
-        if self.next_departure_time is None:
-            # 设置首次发车时间
-            self.next_departure_time = current_time.replace(
-                hour=TOUR_BUS_START_HOUR, minute=0, second=0, microsecond=0
-            )
-            if current_time > self.next_departure_time:
-                # 如果当前时间已超过开始时间，设置为下一班次
-                self.next_departure_time += datetime.timedelta(hours=1)
-        
-        if current_time < self.next_departure_time:
-            # 还未到发车时间，保持等待状态
-            self.is_waiting = True
-            return
-        
-        if self.is_waiting:
-            # 刚刚到达站点，设置停靠时间
-            self.next_departure_time = current_time + datetime.timedelta(seconds=TOUR_BUS_STOP_TIME)
-            self.is_waiting = False
-            return
-        
-        # 计算当前位置到下一站的距离
-        current_stop = self.route[self.current_stop_index]
-        next_stop_index = (self.current_stop_index + 1) % len(self.route)
-        next_stop = self.route[next_stop_index]
-        
-        # 获取两个站点之间的道路
-        graph = global_scenic_area_graph  # 假设我们有全局的景区图对象
-        road = None
-        for neighbor_id, road_id in graph.get_neighbors(current_stop):
-            if neighbor_id == next_stop:
-                road = graph.get_road(road_id)
-                break
-        
-        if road:
-            # 计算行驶时间
-            travel_time = road.length / TOUR_BUS_SPEED
-            
-            # 检查是否到达下一站
-            time_since_departure = (current_time - self.next_departure_time).total_seconds()
-            if time_since_departure >= travel_time:
-                # 到达下一站
-                self.current_stop_index = next_stop_index
-                self.current_position = next_stop
-                self.is_waiting = True
-                self.next_departure_time = current_time  # 重置发车时间
-            else:
-                # 仍在路上
-                self.current_position = f"前往{next_stop}"
-        else:
-            # 没有直接道路，尝试寻找路径
-            path, distance, _ = a_star_shortest_path(graph, current_stop, next_stop)
-            if path:
-                # 简化处理：假设直接到达下一站
-                self.current_stop_index = next_stop_index
-                self.current_position = next_stop
-                self.is_waiting = True
-                self.next_departure_time = current_time
-            else:
-                # 无法到达下一站，保持当前位置
-                pass
 
-def simulate_tour_buses():
-    """模拟观光车运行（在新线程中运行）"""
-    global tour_bus_positions
-    
-    # 初始化观光车
-    buses = []
-    for i in range(TOUR_BUS_COUNT):
-        route_index = i % len(TOUR_BUS_ROUTES)
-        bus = TourBus(i, route_index)
-        buses.append(bus)
-    
-    # 模拟循环
-    while True:
-        current_time = datetime.datetime.now()
-        
-        # 更新所有观光车位置
-        with tour_bus_lock:
-            for bus in buses:
-                bus.update_position(current_time)
-            
-            # 存储当前位置信息
-            tour_bus_positions = [
-                (bus.id, bus.route_index, bus.current_position, bus.is_waiting, bus.next_departure_time)
-                for bus in buses
-            ]
-        
-        # 休眠一段时间
-        time.sleep(5)  # 每5秒更新一次
-
-def get_tour_bus_arrival_time(stop_id: str, current_time: datetime.datetime) -> Tuple[Optional[datetime.datetime], float]:
+def calculate_attraction_distances():
     """
-    获取下一班到达指定站点的观光车时间和费用
+    计算所有景点之间的实际距离（通过道路网络），使用缓存
+    
+    返回:
+        字典，键为(景点1, 景点2)，值为最短距离
+    """
+    global attraction_distances_cache
+    
+    # 如果已经有缓存，直接返回
+    if attraction_distances_cache is not None:
+        return attraction_distances_cache
+    
+    distances = {}
+    attractions = [node_id for node_id, node in graph.nodes.items() if node.is_attraction]
+    
+    # 对每对景点计算最短路径距离
+    for i, start_id in enumerate(attractions):
+        # 使用Dijkstra算法计算从当前景点到所有其他景点的最短距离
+        open_set = []
+        heapq.heappush(open_set, (0, start_id))
+        
+        g_score = {start_id: 0}
+        
+        while open_set:
+            current_dist, current_id = heapq.heappop(open_set)
+            
+            # 如果是景点，记录距离
+            if current_id in attractions and current_id != start_id:
+                distances[(start_id, current_id)] = current_dist
+            
+            # 探索邻居
+            for neighbor_id, road_id in graph.get_neighbors(current_id):
+                road = graph.get_road(road_id)
+                if not road or road.is_blocked:
+                    continue
+                
+                # 计算到邻居的距离
+                tentative_g_score = g_score.get(current_id, float('inf')) + road.length
+                
+                # 如果找到更短路径，更新
+                if tentative_g_score < g_score.get(neighbor_id, float('inf')):
+                    g_score[neighbor_id] = tentative_g_score
+                    heapq.heappush(open_set, (tentative_g_score, neighbor_id))
+    
+    # 缓存结果
+    attraction_distances_cache = distances
+    return distances
+
+# 计算观光车时间表（考虑实际路径距离）
+def calculate_tour_bus_schedule():
+    """
+    计算观光车时间表（考虑实际路径距离）
+    
+    返回:
+        字典，键为(路线ID, 站点名称)，值为观光车到达时间的列表
+    """
+    global tour_bus_schedule
+    schedule = {}
+    
+    # 计算所有景点之间的实际距离
+    attraction_distances = calculate_attraction_distances()
+    
+    # 计算每条路线的时间表
+    for route_id, route in TOUR_BUS_ROUTES.items():
+        # 计算路线中相邻站点之间的实际距离
+        route_distances = []
+        for i in range(len(route) - 1):
+            from_stop = route[i]
+            to_stop = route[i + 1]
+            
+            # 获取两个景点之间的实际距离
+            distance = attraction_distances.get((from_stop, to_stop), float('inf'))
+            if distance == float('inf'):
+                # 如果直接距离不存在，尝试反向
+                distance = attraction_distances.get((to_stop, from_stop), float('inf'))
+            
+            route_distances.append(distance)
+        
+        # 计算该路线的车辆数量（平均分配）
+        buses_per_route = TOUR_BUS_COUNT // len(TOUR_BUS_ROUTES)
+        
+        # 为每辆车计算时间表
+        for bus_index in range(buses_per_route):
+            # 计算发车时间（从8:00开始，每隔10分钟发一辆）
+            departure_minutes = bus_index * 10
+            hours = TOUR_BUS_SCHEDULE_START + departure_minutes // 60
+            minutes = departure_minutes % 60
+            
+            # 确保时间在营业时间内
+            if hours < TOUR_BUS_SCHEDULE_END:
+                departure_time = datetime.datetime.combine(
+                    datetime.date.today(), 
+                    datetime.time(hours, minutes)
+                )
+                
+                current_time = departure_time
+                direction = 1  # 1表示正向，-1表示反向
+                
+                # 模拟车辆运行直到结束时间
+                while current_time.time() < datetime.time(TOUR_BUS_SCHEDULE_END, 0):
+                    # 正向行驶
+                    if direction == 1:
+                        for i in range(len(route)):
+                            stop = route[i]
+                            key = (route_id, stop)
+                            
+                            if key not in schedule:
+                                schedule[key] = []
+                            
+                            # 记录到达时间（第一站就是发车时间）
+                            if i > 0:
+                                # 计算行驶时间 = 距离 / 速度
+                                travel_time = route_distances[i-1] / TOUR_BUS_SPEED
+                                current_time += datetime.timedelta(seconds=travel_time)
+                            
+                            # 检查是否超过结束时间
+                            if current_time.time() >= datetime.time(TOUR_BUS_SCHEDULE_END, 0):
+                                break
+                                
+                            schedule[key].append(current_time)
+                            
+                            # 添加停靠时间
+                            current_time += datetime.timedelta(seconds=TOUR_BUS_STOP_TIME)
+                            
+                            # 检查是否超过结束时间
+                            if current_time.time() >= datetime.time(TOUR_BUS_SCHEDULE_END, 0):
+                                break
+                    
+                    # 反向行驶
+                    else:
+                        for i in range(len(route)-1, -1, -1):
+                            stop = route[i]
+                            key = (route_id, stop)
+                            
+                            if key not in schedule:
+                                schedule[key] = []
+                            
+                            # 记录到达时间
+                            if i < len(route) - 1:
+                                # 计算行驶时间 = 距离 / 速度
+                                travel_time = route_distances[i] / TOUR_BUS_SPEED
+                                current_time += datetime.timedelta(seconds=travel_time)
+                            
+                            # 检查是否超过结束时间
+                            if current_time.time() >= datetime.time(TOUR_BUS_SCHEDULE_END, 0):
+                                break
+                                
+                            schedule[key].append(current_time)
+                            
+                            # 添加停靠时间
+                            current_time += datetime.timedelta(seconds=TOUR_BUS_STOP_TIME)
+                            
+                            # 检查是否超过结束时间
+                            if current_time.time() >= datetime.time(TOUR_BUS_SCHEDULE_END, 0):
+                                break
+                    
+                    # 切换方向
+                    direction *= -1
+                    
+                    # 检查是否超过结束时间
+                    if current_time.time() >= datetime.time(TOUR_BUS_SCHEDULE_END, 0):
+                        break
+    
+    # 对每个站点的时间进行排序
+    for key in schedule:
+        schedule[key].sort()
+    
+    tour_bus_schedule = schedule
+    return schedule
+
+# 获取下一班观光车信息
+def get_next_tour_bus(stop_id: str, current_time: datetime.datetime = None, route_id: int = None) -> Tuple[datetime.datetime, int, int, int]:
+    """
+    获取下一班观光车的信息
     
     参数:
         stop_id: 站点ID
-        current_time: 当前时间
+        current_time: 当前时间，如果为None则使用系统当前时间
+        route_id: 指定路线ID，如果为None则返回所有路线中最快的一班
     
     返回:
-        (到达时间, 费用) 或 (None, 0) 如果没有观光车
+        (下一班观光车到达时间, 需要等待的秒数, 票价, 路线ID)
+        如果没有观光车，返回(None, -1, 0, 0)
     """
-    with tour_bus_lock:
-        # 查找所有会经过该站点的观光车
-        relevant_buses = []
-        for bus_id, route_index, position, is_waiting, next_departure in tour_bus_positions:
-            route = TOUR_BUS_ROUTES[route_index]
-            if stop_id in route:
-                relevant_buses.append((bus_id, route_index, position, is_waiting, next_departure))
-        
-        if not relevant_buses:
-            return None, 0
-        
-        # 计算最近一班车的到达时间
-        earliest_arrival = None
-        for bus_id, route_index, position, is_waiting, next_departure in relevant_buses:
-            route = TOUR_BUS_ROUTES[route_index]
-            
-            if position == stop_id and is_waiting:
-                # 观光车正在该站点停靠
-                arrival_time = current_time
-            else:
-                # 计算从当前位置到目标站点的距离和时间
-                graph = global_scenic_area_graph
-                
-                if position.startswith("前往"):
-                    # 观光车正在路上，提取目的地
-                    destination = position[2:]
-                    path1, distance1, _ , _= a_star_shortest_path(graph, destination, stop_id)
-                    path2, distance2, _ , _ = a_star_shortest_path(graph, position, stop_id)
-                    
-                    if path1 and (not path2 or distance1 < distance2):
-                        # 使用目的地作为起点
-                        travel_distance = distance1
-                        start_point = destination
-                    else:
-                        # 使用当前位置作为起点
-                        travel_distance = distance2 if path2 else float('inf')
-                        start_point = position
-                else:
-                    # 观光车在某个站点
-                    path, travel_distance, _ , _ = a_star_shortest_path(graph, position, stop_id)
-                    start_point = position
-                
-                if travel_distance == float('inf'):
-                    continue
-                
-                # 计算行驶时间
-                travel_time = travel_distance / TOUR_BUS_SPEED
-                
-                if next_departure:
-                    # 计算出发时间
-                    if is_waiting:
-                        departure_time = next_departure + datetime.timedelta(seconds=TOUR_BUS_STOP_TIME)
-                    else:
-                        departure_time = next_departure
-                    
-                    arrival_time = departure_time + datetime.timedelta(seconds=travel_time)
-                else:
-                    # 没有发车时间信息，使用当前时间
-                    arrival_time = current_time + datetime.timedelta(seconds=travel_time)
-            
-            # 更新最早到达时间
-            if earliest_arrival is None or arrival_time < earliest_arrival:
-                earliest_arrival = arrival_time
-        
-        if earliest_arrival:
-            # 计算费用
-            fare = calculate_tour_bus_fare(stop_id)
-            return earliest_arrival, fare
+    if current_time is None:
+        current_time = datetime.datetime.now()
     
-    return None, 0
+    best_time = None
+    best_wait = float('inf')
+    best_fare = 0
+    best_route = 0
+    
+    # 查找所有经过该站点的路线
+    for key, times in tour_bus_schedule.items():
+        r_id, stop = key
+        if stop == stop_id and (route_id is None or r_id == route_id):
+            # 找到下一班车
+            for bus_time in times:
+                if bus_time > current_time:
+                    wait_time = (bus_time - current_time).total_seconds()
+                    
+                    # 计算票价（基础票价 + 每站加价）
+                    fare = TOUR_BUS_BASE_FARE
+                    
+                    # 确定站点在路线中的位置
+                    if stop_id in TOUR_BUS_ROUTES[r_id]:
+                        fare += TOUR_BUS_PER_STOP_FARE * TOUR_BUS_ROUTES[r_id].index(stop_id)
+                    
+                    # 如果这是更早的班次，更新最佳选择
+                    if wait_time < best_wait:
+                        best_time = bus_time
+                        best_wait = wait_time
+                        best_fare = fare
+                        best_route = r_id
+                    
+                    break  # 只取第一班符合条件的车
+    
+    if best_time is None:
+        return None, -1, 0, 0
+    
+    return best_time, best_wait, best_fare, best_route
 
-def calculate_tour_bus_fare(destination_id: str) -> float:
+# 计算乘坐观光车到下一站的时间（考虑实际路径距离）
+def calculate_tour_bus_time(from_stop: str, to_stop: str, board_time: datetime.datetime, route_id: int) -> Tuple[float, float]:
     """
-    计算观光车费用
+    计算乘坐观光车从一站到另一站的时间和票价（考虑实际路径距离）
     
     参数:
-        destination_id: 目的地站点ID
+        from_stop: 起始站点
+        to_stop: 目标站点
+        board_time: 上车时间
+        route_id: 路线ID
     
     返回:
-        费用
+        (旅行时间(秒), 票价)
     """
-    # 简化计算：基础费用 + 每站附加费用
-    # 实际应用中可以根据具体路线计算
-    return TOUR_BUS_BASE_FARE + TOUR_BUS_PER_STOP_FARE
-
-def start_tour_bus_simulation(graph: ScenicAreaGraph):
-    """启动观光车模拟线程"""
-    global global_scenic_area_graph
-    global_scenic_area_graph = graph
+    # 检查路线是否存在
+    if route_id not in TOUR_BUS_ROUTES:
+        return float('inf'), 0
     
-    # 创建并启动线程
-    bus_thread = threading.Thread(target=simulate_tour_buses, daemon=True)
-    bus_thread.start()
+    route = TOUR_BUS_ROUTES[route_id]
+    
+    # 检查站点是否在路线上
+    if from_stop not in route or to_stop not in route:
+        return float('inf'), 0
+    
+    # 计算所有景点之间的实际距离
+    attraction_distances = calculate_attraction_distances()
+    
+    # 检查站点顺序
+    from_index = route.index(from_stop)
+    to_index = route.index(to_stop)
+    
+    # 计算正向行驶时间
+    if from_index < to_index:
+        travel_time = 0
+        for i in range(from_index, to_index):
+            # 获取两个景点之间的实际距离
+            distance = attraction_distances.get((route[i], route[i+1]), float('inf'))
+            if distance == float('inf'):
+                # 如果直接距离不存在，尝试反向
+                distance = attraction_distances.get((route[i+1], route[i]), float('inf'))
+            
+            travel_time += distance / TOUR_BUS_SPEED
+            
+            # 添加停靠时间（除了起始站）
+            if i > from_index:
+                travel_time += TOUR_BUS_STOP_TIME
+        
+        # 计算票价
+        fare = TOUR_BUS_BASE_FARE + TOUR_BUS_PER_STOP_FARE * (to_index - from_index)
+        
+        return travel_time, fare
+    
+    # 计算反向行驶时间
+    elif from_index > to_index:
+        travel_time = 0
+        for i in range(from_index, to_index, -1):
+            # 获取两个景点之间的实际距离
+            distance = attraction_distances.get((route[i], route[i-1]), float('inf'))
+            if distance == float('inf'):
+                # 如果直接距离不存在，尝试反向
+                distance = attraction_distances.get((route[i-1], route[i]), float('inf'))
+            
+            travel_time += distance / TOUR_BUS_SPEED
+            
+            # 添加停靠时间（除了起始站）
+            if i < from_index:
+                travel_time += TOUR_BUS_STOP_TIME
+        
+        # 计算票价
+        fare = TOUR_BUS_BASE_FARE + TOUR_BUS_PER_STOP_FARE * (from_index - to_index)
+        
+        return travel_time, fare
+    
+    # 同一站点
+    else:
+        return 0, 0
 
 #游船部分
 def get_next_boat_time(current_time: datetime.datetime = None) -> Tuple[datetime.datetime, int]:
@@ -443,10 +537,9 @@ def a_star_shortest_path(graph: ScenicAreaGraph, start_id: str, end_id: str) -> 
     return a_star(graph, start_id, end_id, cost_type="distance")
 
 def a_star_fastest_path(graph: ScenicAreaGraph, start_id: str, end_id: str, 
-                       start_time: datetime.datetime = None, 
-                       use_tour_bus: bool = False) -> Tuple[List[str], float, List[Tuple[str, datetime.datetime]], float]:
+                       start_time: datetime.datetime = None, use_tour_bus: bool = False) -> Tuple[List[str], float, List[Tuple[str, datetime.datetime]], float]:
     """
-    使用A*算法寻找最快路径（基于时间，考虑游客密度影响、游船和观光车）
+    使用A*算法寻找最快路径（基于时间，考虑游客密度、游船和观光车）
     
     参数:
         graph: 景区图
@@ -456,8 +549,8 @@ def a_star_fastest_path(graph: ScenicAreaGraph, start_id: str, end_id: str,
         use_tour_bus: 是否使用观光车
     
     返回:
-        (路径节点ID列表, 总时间, 游船信息列表, 总费用) 或 ([], float('inf'), [], 0) 如果找不到路径
-        游船信息格式: (道路ID, 乘船时间)
+        (路径节点ID列表, 总时间, 交通信息列表, 总票价) 
+        交通信息格式: (道路ID或"TOUR_BUS", 乘车时间)
     """
     return a_star(graph, start_id, end_id, cost_type="time", start_time=start_time, use_tour_bus=use_tour_bus)
 
@@ -475,8 +568,8 @@ def a_star(graph: ScenicAreaGraph, start_id: str, end_id: str, cost_type: str = 
         use_tour_bus: 是否使用观光车
     
     返回:
-        (路径节点ID列表, 总代价, 游船信息列表, 总费用) 或 ([], float('inf'), [], 0) 如果找不到路径
-        游船信息格式: (道路ID, 乘船时间)
+        (路径节点ID列表, 总代价, 交通信息列表, 总票价) 或 ([], float('inf'), [], 0) 如果找不到路径
+        交通信息格式: (道路ID或"TOUR_BUS", 乘车时间)
     """
     # 验证起点和终点是否为景点
     start_node = graph.get_node(start_id)
@@ -484,7 +577,7 @@ def a_star(graph: ScenicAreaGraph, start_id: str, end_id: str, cost_type: str = 
     if not start_node or not end_node or not start_node.is_attraction or not end_node.is_attraction:
         return [], float('inf'), [], 0
     
-    # 对于最短路径，不需要考虑时间和观光车
+    # 对于最短路径，不需要考虑时间
     if cost_type == "distance":
         # 开放列表：存储待探索的节点 (f_score, node_id)
         open_set = []
@@ -542,7 +635,7 @@ def a_star(graph: ScenicAreaGraph, start_id: str, end_id: str, cost_type: str = 
         if start_time is None:
             start_time = datetime.datetime.now()
         
-        # 开放列表：存储待探索的节点 (f_score, node_id, current_time, boat_info, total_fare)
+        # 开放列表：存储待探索的节点 (f_score, node_id, current_time, transport_info, total_fare)
         open_set = []
         heapq.heappush(open_set, (0, start_id, start_time, [], 0))
         
@@ -558,13 +651,13 @@ def a_star(graph: ScenicAreaGraph, start_id: str, end_id: str, cost_type: str = 
         
         while open_set:
             # 获取f_score最小的节点
-            current_f, current_id, current_time, current_boat_info, current_fare = heapq.heappop(open_set)
+            current_f, current_id, current_time, current_transport_info, current_fare = heapq.heappop(open_set)
             
             # 如果到达终点，重构路径
             if current_id == end_id:
                 path = reconstruct_path(came_from, current_id)
                 total_time = (current_time - start_time).total_seconds()
-                return path, total_time, current_boat_info, current_fare
+                return path, total_time, current_transport_info, current_fare
             
             # 探索当前节点的所有邻居
             for neighbor_id, road_id in graph.get_neighbors(current_id):
@@ -590,10 +683,10 @@ def a_star(graph: ScenicAreaGraph, start_id: str, end_id: str, cost_type: str = 
                     # 到达邻居节点的时间
                     neighbor_time = current_time + datetime.timedelta(seconds=cost)
                     
-                    # 更新游船信息
-                    new_boat_info = current_boat_info + [(road_id, next_boat_time)]
+                    # 更新交通信息
+                    new_transport_info = current_transport_info + [(road_id, next_boat_time)]
                     
-                    # 费用不变
+                    # 票价不变
                     new_fare = current_fare
                 else:
                     # 普通道路
@@ -603,26 +696,11 @@ def a_star(graph: ScenicAreaGraph, start_id: str, end_id: str, cost_type: str = 
                     # 到达邻居节点的时间
                     neighbor_time = current_time + datetime.timedelta(seconds=cost)
                     
-                    # 游船信息不变
-                    new_boat_info = current_boat_info
+                    # 交通信息不变
+                    new_transport_info = current_transport_info
                     
-                    # 费用不变
+                    # 票价不变
                     new_fare = current_fare
-                
-                # 如果使用观光车，考虑乘坐观光车的选项
-                if use_tour_bus and current_id in [stop for route in TOUR_BUS_ROUTES for stop in route]:
-                    bus_arrival_time, bus_fare = get_tour_bus_arrival_time(current_id, current_time)
-                    
-                    if bus_arrival_time:
-                        # 计算乘坐观光车到下一站的时间
-                        # 简化处理：假设观光车直接到达目的地
-                        bus_travel_time = (bus_arrival_time - current_time).total_seconds()
-                        
-                        # 比较步行和乘坐观光车的时间
-                        if bus_travel_time < cost:
-                            cost = bus_travel_time
-                            neighbor_time = bus_arrival_time
-                            new_fare = current_fare + bus_fare
                 
                 # 计算从起点到邻居节点的总代价
                 tentative_g_score = g_score.get(current_id, float('inf')) + cost
@@ -634,23 +712,72 @@ def a_star(graph: ScenicAreaGraph, start_id: str, end_id: str, cost_type: str = 
                     arrival_time[neighbor_id] = neighbor_time
                     f_score[neighbor_id] = tentative_g_score + heuristic(graph, neighbor_id, end_id, cost_type)
                     
+                    # 在A*算法中，修改观光车处理部分
+                    # 如果使用观光车，考虑乘坐观光车的选项
+                    if use_tour_bus and current_id in [stop for (_, stop) in tour_bus_schedule.keys()]:
+                        # 获取所有可能的路线
+                        possible_routes = set()
+                        for (r_id, stop) in tour_bus_schedule.keys():
+                            if stop == current_id:
+                                possible_routes.add(r_id)
+                        
+                        # 考虑每条路线
+                        for r_id in possible_routes:
+                            # 获取下一班观光车信息
+                            next_bus_time, wait_time, fare_to_next, bus_route_id = get_next_tour_bus(current_id, current_time, r_id)
+                            
+                            if next_bus_time is not None:
+                                # 考虑乘坐观光车到所有可能的站点
+                                for possible_stop in TOUR_BUS_ROUTES[r_id]:
+                                    if possible_stop == current_id:
+                                        continue
+                                    
+                                    # 计算乘坐观光车的时间和票价
+                                    bus_time, bus_fare = calculate_tour_bus_time(current_id, possible_stop, next_bus_time, r_id)
+                                    
+                                    if bus_time < float('inf'):
+                                        # 总时间 = 等待时间 + 乘车时间
+                                        total_bus_time = wait_time + bus_time
+                                        
+                                        # 到达目标站点的时间
+                                        bus_arrival_time = current_time + datetime.timedelta(seconds=total_bus_time)
+                                        
+                                        # 更新交通信息
+                                        bus_transport_info = current_transport_info + [(f"TOUR_BUS_{r_id}", next_bus_time)]
+                                        
+                                        # 更新票价
+                                        bus_total_fare = current_fare + bus_fare
+                                        
+                                        # 计算总代价
+                                        bus_tentative_g_score = g_score.get(current_id, float('inf')) + total_bus_time
+                                        
+                                        # 如果找到更优路径，更新信息
+                                        if bus_tentative_g_score < g_score.get(possible_stop, float('inf')):
+                                            came_from[possible_stop] = (current_id, f"TOUR_BUS_{r_id}")
+                                            g_score[possible_stop] = bus_tentative_g_score
+                                            arrival_time[possible_stop] = bus_arrival_time
+                                            f_score[possible_stop] = bus_tentative_g_score + heuristic(graph, possible_stop, end_id, cost_type)
+                                            
+                                            # 加入开放列表
+                                            heapq.heappush(open_set, (f_score[possible_stop], possible_stop, bus_arrival_time, bus_transport_info, bus_total_fare))
+                    
                     # 如果邻居节点不在开放列表中，加入开放列表
                     found = False
-                    for i, (f, nid, t, bi, fare) in enumerate(open_set):
+                    for i, (f, nid, t, ti, tf) in enumerate(open_set):
                         if nid == neighbor_id:
                             found = True
                             if tentative_g_score < g_score.get(neighbor_id, float('inf')):
-                                open_set[i] = (f_score[neighbor_id], neighbor_id, neighbor_time, new_boat_info, new_fare)
+                                open_set[i] = (f_score[neighbor_id], neighbor_id, neighbor_time, new_transport_info, new_fare)
                                 heapq.heapify(open_set)
                             break
                     
                     if not found:
-                        heapq.heappush(open_set, (f_score[neighbor_id], neighbor_id, neighbor_time, new_boat_info, new_fare))
+                        heapq.heappush(open_set, (f_score[neighbor_id], neighbor_id, neighbor_time, new_transport_info, new_fare))
         
         return [], float('inf'), [], 0
 
 def print_path(graph: ScenicAreaGraph, path: List[str], total_cost: float, cost_type: str, 
-              boat_info: List[Tuple[str, datetime.datetime]] = None, total_fare: float = 0):
+              transport_info: List[Tuple[str, datetime.datetime]] = None, total_fare: float = 0):
     """
     打印路径详情
     
@@ -659,8 +786,8 @@ def print_path(graph: ScenicAreaGraph, path: List[str], total_cost: float, cost_
         path: 路径节点ID列表
         total_cost: 总代价
         cost_type: 代价类型，"distance"或"time"
-        boat_info: 游船信息列表
-        total_fare: 总费用
+        transport_info: 交通信息列表
+        total_fare: 总票价
     """
     if not path:
         print("无法找到路径")
@@ -669,15 +796,19 @@ def print_path(graph: ScenicAreaGraph, path: List[str], total_cost: float, cost_
     print(f"路径找到! 总{'距离' if cost_type == 'distance' else '时间'}: {total_cost:.2f}{'米' if cost_type == 'distance' else '秒'}")
     
     if total_fare > 0:
-        print(f"总费用: {total_fare:.2f}元")
+        print(f"总票价: {total_fare:.2f}元")
     
-    # 打印游船信息
-    if boat_info:
-        print("游船信息:")
-        for road_id, boat_time in boat_info:
-            road = graph.get_road(road_id)
-            if road:
-                print(f"  乘坐游船通过道路 {road_id} ({road.node1_id}-{road.node2_id}), 发船时间: {boat_time.strftime('%H:%M:%S')}")
+    # 打印交通信息
+    if transport_info:
+        print("交通信息:")
+        for transport_id, transport_time in transport_info:
+            if transport_id.startswith("TOUR_BUS_"):
+                route_id = int(transport_id.split("_")[2])
+                print(f"  乘坐{route_id}号线观光车, 发车时间: {transport_time.strftime('%H:%M:%S')}")
+            else:
+                road = graph.get_road(transport_id)
+                if road and road.is_blocked:
+                    print(f"  乘坐游船通过道路 {transport_id} ({road.node1_id}-{road.node2_id}), 发船时间: {transport_time.strftime('%H:%M:%S')}")
     
     print("路径详情:")
     
@@ -687,9 +818,11 @@ def print_path(graph: ScenicAreaGraph, path: List[str], total_cost: float, cost_
         
         # 查找连接两个节点的道路
         road = None
-        for neighbor_id, road_id in graph.get_neighbors(node1_id):
+        road_id = None
+        for neighbor_id, r_id in graph.get_neighbors(node1_id):
             if neighbor_id == node2_id:
-                road = graph.get_road(road_id)
+                road = graph.get_road(r_id)
+                road_id = r_id
                 break
         
         if road:
@@ -707,6 +840,12 @@ def print_path(graph: ScenicAreaGraph, path: List[str], total_cost: float, cost_
                     speed = calculate_speed(road.density)
                     time_cost = road.length / speed if speed > 0 else float('inf')
                     print(f"  {node1_id} ({is_attraction1}) -> {node2_id} ({is_attraction2}): {time_cost:.2f}秒 (密度: {road.density:.2f}, 速度: {speed:.2f}米/秒)")
+        
+        # 检查是否是观光车路段
+        elif any(transport_id.startswith("TOUR_BUS") for transport_id, _ in transport_info if transport_id.startswith("TOUR_BUS")):
+            # 这是一个观光车路段
+            route_id = int([tid for tid, _ in transport_info if tid.startswith("TOUR_BUS")][0].split("_")[2])
+            print(f"  {node1_id} -> {node2_id}: 乘坐{route_id}号线观光车 (车速: {TOUR_BUS_SPEED:.2f}米/秒)")
 
 def visualize_graph(graph: ScenicAreaGraph, shortest_path: List[str] = None, fastest_path: List[str] = None):
     """
@@ -736,21 +875,16 @@ def visualize_graph(graph: ScenicAreaGraph, shortest_path: List[str] = None, fas
                         color=color, alpha=0.5, linewidth=2)
     
     # 绘制观光车路线
-    for i, route in enumerate(TOUR_BUS_ROUTES):
-        route_lons = []
-        route_lats = []
-        for stop_id in route:
-            node = graph.get_node(stop_id)
-            if node:
-                route_lons.append(node.lon)
-                route_lats.append(node.lat)
-        
-        # 使用不同的颜色和线型表示不同的观光车路线
-        colors = ['orange', 'purple']
-        line_styles = ['-', '--']
-        ax.plot(route_lons, route_lats, color=colors[i % len(colors)], 
-                linestyle=line_styles[i % len(line_styles)], alpha=0.7, 
-                linewidth=3, label=f'观光车路线{i+1}')
+    colors = ['m', 'c', 'y', 'k']  # 不同路线的颜色
+    for route_id, route in TOUR_BUS_ROUTES.items():
+        color = colors[(route_id - 1) % len(colors)]
+        for i in range(len(route) - 1):
+            node1 = graph.get_node(route[i])
+            node2 = graph.get_node(route[i + 1])
+            if node1 and node2:
+                ax.plot([node1.lon, node2.lon], [node1.lat, node2.lat], 
+                        color=color, alpha=0.7, linewidth=3, 
+                        label=f'观光车路线{route_id}' if i == 0 else "")
     
     # 绘制所有节点
     attraction_lons = []
@@ -833,6 +967,7 @@ def visualize_graph(graph: ScenicAreaGraph, shortest_path: List[str] = None, fas
 # 示例用法
 def main():
     # 创建景区图
+    global graph
     graph = ScenicAreaGraph()
     
     # 添加景点节点
@@ -889,39 +1024,40 @@ def main():
     for road in roads:
         graph.add_road(road)
     
-    # 启动观光车模拟
-    start_tour_bus_simulation(graph)
+    # 计算观光车时间表
+    calculate_tour_bus_schedule()
     
-    # 测试最短路径
-    print("=== 最短路径 (基于距离) ===")
+    # 打印观光车时间表示例
+    print("=== 观光车时间表示例 ===")
+    for (route_id, stop), times in list(tour_bus_schedule.items())[:5]:  # 只打印前5个
+        print(f"路线{route_id} - {stop}: {[t.strftime('%H:%M:%S') for t in times[:3]]}...")  # 只打印前3个时间
+    
+    # 测试不使用观光车的最快路径
+    print("\n=== 不使用观光车的最快路径 (基于时间，考虑游客密度和游船) ===")
     start, end = "入口", "湖心岛"
-    shortest_path, total_distance, _, _ = a_star_shortest_path(graph, start, end)
-    print_path(graph, shortest_path, total_distance, "distance")
+    test_time = datetime.datetime.now().replace(hour=9, minute=0, second=0)
     
-    print("\n=== 最快路径 (基于时间，考虑游客密度和游船) ===")
-    # 设置不同的出发时间测试游船功能
-    test_time = datetime.datetime.now().replace(hour=10, minute=0, second=0)
+    fastest_path, total_time, transport_info, total_fare = a_star_fastest_path(graph, start, end, test_time, False)
+    print_path(graph, fastest_path, total_time, "time", transport_info, total_fare)
     
-    print(f"\n--- 出发时间: {test_time.strftime('%H:%M:%S')} ---")
-    fastest_path, total_time, boat_info, fare = a_star_fastest_path(graph, start, end, test_time)
+    # 测试使用观光车的最快路径
+    print("\n=== 使用观光车的最快路径 (基于时间，考虑游客密度、游船和观光车) ===")
+    fastest_path_bus, total_time_bus, transport_info_bus, total_fare_bus = a_star_fastest_path(graph, start, end, test_time, True)
+    print_path(graph, fastest_path_bus, total_time_bus, "time", transport_info_bus, total_fare_bus)
     
-    if fastest_path:
-        print_path(graph, fastest_path, total_time, "time", boat_info, fare)
+    # 比较两种方案
+    print("\n=== 方案比较 ===")
+    print(f"不使用观光车: 时间 {total_time:.2f}秒, 票价 {total_fare:.2f}元")
+    print(f"使用观光车: 时间 {total_time_bus:.2f}秒, 票价 {total_fare_bus:.2f}元")
+    
+    if total_time_bus < total_time:
+        time_saved = total_time - total_time_bus
+        print(f"使用观光车可以节省 {time_saved:.2f}秒, 但需要多支付 {total_fare_bus - total_fare:.2f}元")
     else:
-        print("无法找到路径")
-    
-    print("\n=== 使用观光车的最快路径 ===")
-    fastest_path_bus, total_time_bus, boat_info_bus, fare_bus = a_star_fastest_path(
-        graph, start, end, test_time, use_tour_bus=True
-    )
-    
-    if fastest_path_bus:
-        print_path(graph, fastest_path_bus, total_time_bus, "time", boat_info_bus, fare_bus)
-    else:
-        print("无法找到路径")
+        print("不使用观光车更快")
     
     # 可视化
-    visualize_graph(graph, shortest_path, fastest_path if fastest_path else None)
+    visualize_graph(graph, None, fastest_path_bus)
 
 if __name__ == "__main__":
     main()
